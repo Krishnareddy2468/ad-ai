@@ -50,10 +50,8 @@ export async function personalizeHtml(
           const isMatch =
             normalizedElText === normalizedOriginal ||
             collapsedElText === collapsedOriginal ||
-            normalizedElText.includes(normalizedOriginal) ||
-            normalizedOriginal.includes(normalizedElText) ||
-            (normalizedElText.length > 5 && similarity(normalizedElText, normalizedOriginal) > 0.5) ||
-            (change.type === 'cta' && normalizedElText.length < 40 && wordOverlap(normalizedElText, normalizedOriginal) > 0.5);
+            (normalizedElText.length > 10 && similarity(normalizedElText, normalizedOriginal) > 0.75) ||
+            (change.type === 'cta' && normalizedElText.length < 40 && normalizedElText.length > 2 && wordOverlap(normalizedElText, normalizedOriginal) > 0.6);
 
           if (isMatch) {
             found = true;
@@ -80,7 +78,7 @@ export async function personalizeHtml(
           const elText = getTextWithSpaces($, el);
           const collapsedEl = elText.toLowerCase().replace(/\s/g, '');
           if (elText.length > 0 && (
-            similarity(elText.toLowerCase(), normalizedOriginal) > 0.6 ||
+            similarity(elText.toLowerCase(), normalizedOriginal) > 0.8 ||
             collapsedEl === collapsedOriginal
           )) {
             found = true;

@@ -117,17 +117,21 @@ export function extractPageStructure(html: string) {
     elements.push({ type, selector, text: cleaned });
   }
 
-  // Extract headlines (h1-h4) — skip short fragments (< 15 chars or < 3 words)
+  // Skip elements inside nav, footer, cookie banners
+  const skipSelectors = 'nav, footer, [class*="cookie"], [class*="Cookie"], [class*="nav"], [class*="Nav"], [class*="footer"], [class*="Footer"], [role="navigation"], [role="contentinfo"]';
+
+  // Extract headlines (h1-h4) — strict: ≥20 chars, ≥3 words, not inside nav/footer
   $('h1, h2, h3, h4').each((i, el) => {
+    if ($(el).closest(skipSelectors).length > 0) return;
     const tag = $(el).prop('tagName')?.toLowerCase() || 'h1';
     const text = spacedText(el);
     const wordCount = text.split(/\s+/).length;
-    if (text.length >= 15 && wordCount >= 3 && text.length < 300) {
+    if (text.length >= 20 && wordCount >= 3 && text.length < 300) {
       addElement(tag === 'h1' ? 'headline' : 'subheadline', `${tag}:nth-of-type(${i + 1})`, text);
     }
   });
 
-  // Extract CTAs — broader selectors
+  // Extract CTAs — skip nav/footer CTAs
   const ctaSelectors = [
     'a[class*="btn"]', 'a[class*="button"]', 'a[class*="Button"]',
     'a[class*="cta"]', 'a[class*="CTA"]',
@@ -137,24 +141,27 @@ export function extractPageStructure(html: string) {
     'a[href*="get-started"]', 'a[href*="pricing"]',
   ];
   $(ctaSelectors.join(', ')).each((i, el) => {
+    if ($(el).closest(skipSelectors).length > 0) return;
     const text = spacedText(el);
-    if (text.length > 0 && text.length < 80) {
+    if (text.length >= 3 && text.length < 80) {
       addElement('cta', `cta-${i}`, text);
     }
   });
 
-  // Extract hero/lead text — first large text in main/section/header
+  // Extract hero/lead text — first large text in main/section/header (≥20 chars)
   $('main p, header p, section p, [class*="hero"] p, [class*="Hero"] p, [class*="banner"] p').slice(0, 5).each((i, el) => {
+    if ($(el).closest(skipSelectors).length > 0) return;
     const text = spacedText(el);
-    if (text.length > 15 && text.length < 500) {
+    if (text.length >= 20 && text.length < 500) {
       addElement('hero', `hero-p-${i}`, text);
     }
   });
 
-  // Extract paragraphs (first 15, skip very short ones)
+  // Extract paragraphs — skip nav/footer, require ≥20 chars
   $('p').slice(0, 15).each((i, el) => {
+    if ($(el).closest(skipSelectors).length > 0) return;
     const text = spacedText(el);
-    if (text.length > 15 && text.length < 500) {
+    if (text.length >= 20 && text.length < 500) {
       addElement('body', `p:nth-of-type(${i + 1})`, text);
     }
   });
@@ -167,10 +174,12 @@ export function extractPageStructure(html: string) {
     }
   });
 
-  // Extract span/div with large text that might be headlines in SPAs
+  // Extract span/div with large text that might be headlines in SPAs — strict thresholds
   $('[class*="title"], [class*="Title"], [class*="heading"], [class*="Heading"]').each((i, el) => {
+    if ($(el).closest(skipSelectors).length > 0) return;
     const text = spacedText(el);
-    if (text.length > 3 && text.length < 200) {
+    const wordCount = text.split(/\s+/).length;
+    if (text.length >= 20 && wordCount >= 3 && text.length < 200) {
       addElement('headline', `titled-${i}`, text);
     }
   });

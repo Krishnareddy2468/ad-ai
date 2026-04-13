@@ -1,50 +1,34 @@
 import { generateWithFallback, safeParseJSON } from '../openai';
 import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
 
-const MAX_ELEMENTS = 15; // Limit elements to keep prompt manageable
-const MAX_CHANGES = 6;   // Hard cap on number of changes returned
+const MAX_ELEMENTS = 12; // Limit elements to keep prompt focused
+const MAX_CHANGES = 4;   // Strict cap — always exactly 4 changes
 
-const SYSTEM_PROMPT = `You are an expert CRO copywriter. Your job is to rewrite landing page copy so it feels like the page was built specifically for the ad the user just clicked. Every modification must sound natural, professional, and persuasive — like it was written by a senior marketing copywriter, not a robot.
+const SYSTEM_PROMPT = `You are a CRO copywriter. Rewrite landing page text so it matches the ad the visitor clicked.
 
-CRO Principles:
-1. MESSAGE MATCH: Headline mirrors the ad's core promise
-2. SCENT TRAIL: Visual/verbal continuity from ad to page
-3. SINGLE FOCUS: Primary CTA aligned with ad intent
-4. URGENCY: Match the ad's urgency tone
-5. BENEFIT COPY: Lead with benefits, not features
+STRICT RULES — follow these exactly:
+1. Return EXACTLY 4 changes. No more, no fewer.
+2. "original" MUST be copied character-for-character from the page elements list below. Do NOT shorten, rephrase, or paraphrase the original.
+3. "modified" MUST keep the same approximate length as the original (±30% word count).
+4. "modified" MUST blend the ad's promise with the page's existing voice. Do NOT paste the ad headline verbatim.
+5. Do NOT invent statistics, testimonials, percentages, or claims that are not in the ad analysis.
+6. Do NOT modify navigation labels, footer links, or cookie notices.
+7. Pick only elements with 3 or more words as originals. Skip single words or short fragments.
+8. Each "type" must be one of: headline, subheadline, cta, body, hero.
 
-Writing Rules:
-- Write like a professional copywriter — punchy, clear, benefit-driven
-- Keep the page's existing voice and style, but weave in the ad's messaging
-- Do NOT just paste the ad headline into the page verbatim
-- Headlines should be compelling and action-oriented (8-12 words ideal)
-- CTAs should be specific and action-driven ("Start Your Free Trial" not just "Sign Up")
-- Body text should naturally reference the ad's key value proposition
-- Never invent fake statistics, testimonials, or claims
-- Keep modifications concise — don't turn a short headline into a paragraph
+CHANGE PRIORITY (pick in this order):
+  1st: The primary headline (h1) — align with ad promise
+  2nd: A subheadline (h2/h3) — reinforce value proposition
+  3rd: The primary CTA button — match ad call-to-action
+  4th: A body/hero paragraph — weave in ad keywords naturally
 
-BAD modification example:
-  original: "Welcome to Our Platform"
-  modified: "50% Off Running Shoes"  ← Just pasted ad headline, doesn't fit the page
+FORMATTING:
+- Headlines: 6–12 words, benefit-driven
+- CTAs: 2–5 words, action verb ("Start Free Trial", "Get Your Demo")
+- Body: Same sentence count as original, naturally reference ad value prop
 
-GOOD modification example:
-  original: "Welcome to Our Platform"
-  modified: "The Running Gear That Keeps Up With You — Now 50% Off"  ← Professional, blends ad promise with page context
-
-IMPORTANT: Return ONLY valid JSON. No markdown, no explanation, no code fences.
-
-Return this exact JSON structure:
-{"messageMatchScore":75,"currentIssues":["issue1"],"recommendations":["rec1"],"priorityChanges":[{"selector":"h1:nth-of-type(1)","type":"headline","original":"exact original text","modified":"professionally rewritten text","rationale":"why this change improves conversion","croRule":"MESSAGE MATCH"}]}
-
-Rules for priorityChanges:
-- Make 4-6 changes maximum
-- "original" must be the EXACT text from the page elements
-- "modified" must be professionally written marketing copy
-- "type" must be: headline, subheadline, cta, body, or hero
-- Headlines: 6-15 words, benefit-driven, action-oriented
-- CTAs: 2-6 words, specific action verbs ("Get Started Free", "Claim Your Discount")
-- Body: Keep similar length, refocus on ad's value proposition
-- Each change must include a clear rationale`;
+Return ONLY this JSON — no markdown, no explanation, no code fences:
+{"messageMatchScore":70,"currentIssues":["issue"],"recommendations":["rec"],"priorityChanges":[{"selector":"h1:nth-of-type(1)","type":"headline","original":"exact text from list","modified":"rewritten text","rationale":"reason","croRule":"MESSAGE MATCH"}]}`;
 
 /**
  * Prepare elements for the prompt — limit count, shorten long texts, 
@@ -74,16 +58,31 @@ function prepareElements(
 }
 
 /**
- * Hard-cap and deduplicate changes from LLM output.
- * Prevents hallucinated single-word targets and duplicate modifications.
+ * Hard-cap and validate changes from LLM output.
+ * Enforces: no fragments, no hallucinated originals, no duplicates.
  */
-function capChanges(changes: PageElement[]): PageElement[] {
+function capChanges(
+  changes: PageElement[],
+  knownTexts: Set<string>
+): PageElement[] {
   const filtered = changes.filter(c => {
-    // Skip changes where the original is too short (likely a fragment)
-    if (c.original.trim().split(/\s+/).length < 2) return false;
-    if (c.original.trim().length < 10) return false;
-    // Skip if modified is basically the same as original
-    if (c.original.trim().toLowerCase() === c.modified.trim().toLowerCase()) return false;
+    const orig = c.original.trim();
+    // Skip fragments: must have ≥3 words and ≥15 chars
+    if (orig.split(/\s+/).length < 3) return false;
+    if (orig.length < 15) return false;
+    // Skip no-ops
+    if (orig.toLowerCase() === c.modified.trim().toLowerCase()) return false;
+    // Anti-hallucination: "original" must be a real page element we passed in
+    const origNorm = orig.toLowerCase().replace(/\s+/g, ' ');
+    let matchFound = false;
+    for (const known of Array.from(knownTexts)) {
+      const knownNorm = known.toLowerCase().replace(/\s+/g, ' ');
+      if (knownNorm === origNorm || knownNorm.includes(origNorm) || origNorm.includes(knownNorm)) {
+        matchFound = true;
+        break;
+      }
+    }
+    if (!matchFound) return false;
     return true;
   });
   // Deduplicate by original text
@@ -104,7 +103,10 @@ export async function analyzeCRO(
 ): Promise<CROAnalysis> {
   const preparedElements = prepareElements(pageElements);
 
-  // Compact ad summary to reduce token usage
+  // Build a set of known page texts for anti-hallucination validation
+  const knownTexts = new Set<string>(preparedElements.map(e => e.text));
+
+  // Compact ad summary — only include fields that have values
   const adSummary = {
     headline: adAnalysis.headline,
     valueProposition: adAnalysis.valueProposition,
@@ -115,9 +117,14 @@ export async function analyzeCRO(
     keywords: adAnalysis.keywords.slice(0, 5),
   };
 
+  // Numbered element list — LLM must reference items by exact text
+  const elementList = preparedElements
+    .map((e, i) => `  ${i + 1}. [${e.type.toUpperCase()}] "${e.text}"`)
+    .join('\n');
+
   const prompt = `${SYSTEM_PROMPT}
 
---- AD CREATIVE ANALYSIS ---
+--- AD ANALYSIS ---
 Headline: "${adSummary.headline}"
 Value Proposition: "${adSummary.valueProposition}"
 Target Audience: ${adSummary.targetAudience}
@@ -127,30 +134,27 @@ Urgency: ${adSummary.urgency}
 Keywords: ${adSummary.keywords.join(', ')}
 
 --- LANDING PAGE: "${pageTitle}" ---
-Current page elements:
-${preparedElements.map((e, i) => `${i + 1}. [${e.type.toUpperCase()}] "${e.text}"`).join('\n')}
+Page elements (copy the "original" field EXACTLY from the quoted text below):
+${elementList}
 
---- INSTRUCTIONS ---
-Analyze the gap between what the ad promises and what your page currently says.
-Score the current message match (0-100).
-Then write 4-6 professional copy modifications that close the gap.
-Each "modified" field must be polished marketing copy — NOT a copy-paste of the ad text.
-Think like a conversion copywriter crafting landing page copy for this specific ad campaign.
+--- TASK ---
+1. Score the message match between ad and page (0-100).
+2. Pick EXACTLY 4 elements from the list above (priority: headline → subheadline → CTA → body).
+3. Rewrite each one to align with the ad's promise while keeping the page's voice.
+4. Copy the "original" text exactly as shown in quotes above — character for character.
+5. Return ONLY the JSON object. No other text.`;
 
-Return ONLY the JSON object.`;
-
-  // Try up to 2 attempts with different temperatures
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await generateWithFallback({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: attempt === 0 ? 0.3 : 0.2,
-        maxOutputTokens: 8192,
-      },
-    });
+  // Single attempt with very low temperature for consistency
+  const result = await generateWithFallback({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 4096,
+    },
+  });
 
     const content = result.response.text() || '{}';
-    console.log(`[CRO Optimizer] Attempt ${attempt + 1} — response length: ${content.length} chars`);
+    console.log(`[CRO Optimizer] Response length: ${content.length} chars`);
 
     const fallback: CROAnalysis = {
       messageMatchScore: 50,
@@ -161,22 +165,17 @@ Return ONLY the JSON object.`;
 
     const parsed = safeParseJSON<CROAnalysis>(content, fallback);
 
-    // If we got actual changes, cap and return them
+    // Validate and cap changes using known page texts
     if (parsed.priorityChanges && parsed.priorityChanges.length > 0) {
-      parsed.priorityChanges = capChanges(parsed.priorityChanges);
-      console.log('[CRO Optimizer] Parsed', parsed.priorityChanges.length, 'changes (capped), score:', parsed.messageMatchScore);
-      return parsed;
+      parsed.priorityChanges = capChanges(parsed.priorityChanges, knownTexts);
+      console.log('[CRO Optimizer] Validated', parsed.priorityChanges.length, 'changes, score:', parsed.messageMatchScore);
+      if (parsed.priorityChanges.length > 0) {
+        return parsed;
+      }
     }
 
-    // First attempt failed to produce changes — retry with simpler prompt
-    if (attempt === 0) {
-      console.warn('[CRO Optimizer] No changes parsed on attempt 1, retrying with simpler prompt...');
-      console.warn('[CRO Optimizer] Raw response:', content.substring(0, 500));
-    }
-  }
-
-  // Final fallback: generate synthetic changes from the page elements + ad analysis
-  console.warn('[CRO Optimizer] LLM failed to produce changes — generating synthetic CRO recommendations');
+  // Fallback: generate synthetic changes from the page elements + ad analysis
+  console.warn('[CRO Optimizer] LLM produced no valid changes — generating synthetic CRO recommendations');
   return generateSyntheticCRO(preparedElements, adAnalysis, pageTitle);
 }
 
