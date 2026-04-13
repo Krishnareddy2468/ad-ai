@@ -104,15 +104,25 @@ export function extractPageStructure(html: string) {
   function addElement(type: string, selector: string, text: string) {
     const cleaned = text.replace(/\s+/g, ' ').trim();
     if (cleaned.length < 3 || seen.has(cleaned)) return;
+    // Skip text that is a substring of an already-seen element (e.g., "thing" inside "Be the next big thing")
+    const cleanedLower = cleaned.toLowerCase();
+    let isFragment = false;
+    for (const s of Array.from(seen)) {
+      if (s.toLowerCase().includes(cleanedLower) || cleanedLower.includes(s.toLowerCase())) {
+        if (cleaned.length < s.length) { isFragment = true; break; }
+      }
+    }
+    if (isFragment) return;
     seen.add(cleaned);
     elements.push({ type, selector, text: cleaned });
   }
 
-  // Extract headlines (h1-h4) — skip tiny fragments (< 5 chars)
+  // Extract headlines (h1-h4) — skip short fragments (< 15 chars or < 3 words)
   $('h1, h2, h3, h4').each((i, el) => {
     const tag = $(el).prop('tagName')?.toLowerCase() || 'h1';
     const text = spacedText(el);
-    if (text.length >= 5 && text.length < 300) {
+    const wordCount = text.split(/\s+/).length;
+    if (text.length >= 15 && wordCount >= 3 && text.length < 300) {
       addElement(tag === 'h1' ? 'headline' : 'subheadline', `${tag}:nth-of-type(${i + 1})`, text);
     }
   });

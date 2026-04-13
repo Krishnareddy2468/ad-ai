@@ -1,7 +1,8 @@
 import { generateWithFallback, safeParseJSON } from '../openai';
 import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
 
-const MAX_ELEMENTS = 25; // Limit elements to keep prompt manageable
+const MAX_ELEMENTS = 15; // Limit elements to keep prompt manageable
+const MAX_CHANGES = 6;   // Hard cap on number of changes returned
 
 const SYSTEM_PROMPT = `You are an expert CRO copywriter. Your job is to rewrite landing page copy so it feels like the page was built specifically for the ad the user just clicked. Every modification must sound natural, professional, and persuasive — like it was written by a senior marketing copywriter, not a robot.
 
@@ -72,6 +73,30 @@ function prepareElements(
   }));
 }
 
+/**
+ * Hard-cap and deduplicate changes from LLM output.
+ * Prevents hallucinated single-word targets and duplicate modifications.
+ */
+function capChanges(changes: PageElement[]): PageElement[] {
+  const filtered = changes.filter(c => {
+    // Skip changes where the original is too short (likely a fragment)
+    if (c.original.trim().split(/\s+/).length < 2) return false;
+    if (c.original.trim().length < 10) return false;
+    // Skip if modified is basically the same as original
+    if (c.original.trim().toLowerCase() === c.modified.trim().toLowerCase()) return false;
+    return true;
+  });
+  // Deduplicate by original text
+  const seen = new Set<string>();
+  const deduped = filtered.filter(c => {
+    const key = c.original.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return deduped.slice(0, MAX_CHANGES);
+}
+
 export async function analyzeCRO(
   pageElements: { type: string; selector: string; text: string }[],
   adAnalysis: AdAnalysis,
@@ -136,9 +161,10 @@ Return ONLY the JSON object.`;
 
     const parsed = safeParseJSON<CROAnalysis>(content, fallback);
 
-    // If we got actual changes, return them
+    // If we got actual changes, cap and return them
     if (parsed.priorityChanges && parsed.priorityChanges.length > 0) {
-      console.log('[CRO Optimizer] Parsed', parsed.priorityChanges.length, 'changes, score:', parsed.messageMatchScore);
+      parsed.priorityChanges = capChanges(parsed.priorityChanges);
+      console.log('[CRO Optimizer] Parsed', parsed.priorityChanges.length, 'changes (capped), score:', parsed.messageMatchScore);
       return parsed;
     }
 
