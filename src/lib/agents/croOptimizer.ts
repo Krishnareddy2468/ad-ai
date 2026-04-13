@@ -1,13 +1,13 @@
 import { generateWithFallback, safeParseJSON } from '../openai';
 import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
 
-const MAX_ELEMENTS = 12; // Limit elements to keep prompt focused
-const MAX_CHANGES = 4;   // Strict cap — always exactly 4 changes
+const MAX_ELEMENTS = 15; // Enough elements for 6 changes
+const MAX_CHANGES = 6;   // Hard cap — up to 6 changes
 
 const SYSTEM_PROMPT = `You are a CRO copywriter. Rewrite landing page text so it matches the ad the visitor clicked.
 
 STRICT RULES — follow these exactly:
-1. Return EXACTLY 4 changes. No more, no fewer.
+1. Return EXACTLY 6 changes. No more, no fewer.
 2. "original" MUST be copied character-for-character from the page elements list below. Do NOT shorten, rephrase, or paraphrase the original.
 3. "modified" MUST keep the same approximate length as the original (±30% word count).
 4. "modified" MUST blend the ad's promise with the page's existing voice. Do NOT paste the ad headline verbatim.
@@ -21,6 +21,8 @@ CHANGE PRIORITY (pick in this order):
   2nd: A subheadline (h2/h3) — reinforce value proposition
   3rd: The primary CTA button — match ad call-to-action
   4th: A body/hero paragraph — weave in ad keywords naturally
+  5th: A second subheadline or body element — deepen message match
+  6th: A secondary CTA or additional body text — consistent scent trail
 
 FORMATTING:
 - Headlines: 6–12 words, benefit-driven
@@ -72,12 +74,22 @@ function capChanges(
     if (orig.length < 15) return false;
     // Skip no-ops
     if (orig.toLowerCase() === c.modified.trim().toLowerCase()) return false;
-    // Anti-hallucination: "original" must be a real page element we passed in
+    // Anti-hallucination: "original" must closely match a real page element
     const origNorm = orig.toLowerCase().replace(/\s+/g, ' ');
+    const origCollapsed = origNorm.replace(/\s/g, '');
     let matchFound = false;
     for (const known of Array.from(knownTexts)) {
       const knownNorm = known.toLowerCase().replace(/\s+/g, ' ');
-      if (knownNorm === origNorm || knownNorm.includes(origNorm) || origNorm.includes(knownNorm)) {
+      const knownCollapsed = knownNorm.replace(/\s/g, '');
+      // Exact, substring, or collapsed match (handles spacing differences)
+      if (
+        knownNorm === origNorm ||
+        knownCollapsed === origCollapsed ||
+        knownNorm.includes(origNorm) ||
+        origNorm.includes(knownNorm) ||
+        knownCollapsed.includes(origCollapsed) ||
+        origCollapsed.includes(knownCollapsed)
+      ) {
         matchFound = true;
         break;
       }
@@ -139,7 +151,7 @@ ${elementList}
 
 --- TASK ---
 1. Score the message match between ad and page (0-100).
-2. Pick EXACTLY 4 elements from the list above (priority: headline → subheadline → CTA → body).
+2. Pick EXACTLY 6 elements from the list above (priority: headline → subheadline → CTA → body → more body/CTAs).
 3. Rewrite each one to align with the ad's promise while keeping the page's voice.
 4. Copy the "original" text exactly as shown in quotes above — character for character.
 5. Return ONLY the JSON object. No other text.`;
