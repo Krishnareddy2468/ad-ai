@@ -77,10 +77,35 @@ export async function orchestrate(
 
   callbacks?.onStepStart('scrape');
   const scrapeStart = Date.now();
-  const { html: originalHtml, title, text } = await scrapePage(input.landingPageUrl);
+  let originalHtml: string;
+  let title: string;
+  let text: string;
+  let scrapeFailed = false;
+
+  try {
+    const scraped = await scrapePage(input.landingPageUrl);
+    originalHtml = scraped.html;
+    title = scraped.title;
+    text = scraped.text;
+  } catch (scrapeError: any) {
+    console.error(`[Orchestrator] Scrape failed: ${scrapeError.message}`);
+    scrapeFailed = true;
+    // Create a minimal proxy HTML that loads the page in an iframe
+    // This ensures the personalized view at least shows the original page
+    title = input.landingPageUrl;
+    text = '';
+    originalHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${input.landingPageUrl}</title>
+<style>*{margin:0;padding:0}body,html{width:100%;height:100%}</style>
+</head><body>
+<iframe src="${input.landingPageUrl}" style="width:100%;height:100%;border:none" 
+  sandbox="allow-same-origin allow-scripts allow-popups allow-forms"></iframe>
+</body></html>`;
+  }
+
   const pageElements = extractPageStructure(originalHtml);
   
-  const isSpaPage = pageElements.length <= 2 && text.length < 200;
+  const isSpaPage = !scrapeFailed && (pageElements.length <= 2 && text.length < 200);
   if (isSpaPage) {
     console.warn(`[Orchestrator] Possible SPA page: only ${pageElements.length} elements, ${text.length} chars of text`);
   }
@@ -92,17 +117,21 @@ export async function orchestrate(
     startedAt: scrapeStart,
     completedAt: Date.now(),
     input: input.landingPageUrl,
-    output: isSpaPage
-      ? `SPA detected — ${pageElements.length} elements from "${title}" (JS-rendered page, limited server-side content)`
-      : `${pageElements.length} elements extracted from "${title}"`,
+    output: scrapeFailed
+      ? `Scrape failed — using iframe proxy fallback for "${input.landingPageUrl}"`
+      : isSpaPage
+        ? `SPA detected — ${pageElements.length} elements from "${title}" (JS-rendered page, limited server-side content)`
+        : `${pageElements.length} elements extracted from "${title}"`,
     retryCount: 0,
-    status: isSpaPage ? 'error' : 'success',
+    status: scrapeFailed ? 'error' : (isSpaPage ? 'error' : 'success'),
   });
   callbacks?.onStepComplete(
     'scrape',
-    isSpaPage
-      ? `⚠️ SPA detected — "${title}" | ${pageElements.length} elements | JS-rendered page`
-      : `"${title}" | ${pageElements.length} elements | ${(text.length / 1000).toFixed(1)}k chars`,
+    scrapeFailed
+      ? `⚠️ Scrape failed — using fallback proxy | ${input.landingPageUrl}`
+      : isSpaPage
+        ? `⚠️ SPA detected — "${title}" | ${pageElements.length} elements | JS-rendered page`
+        : `"${title}" | ${pageElements.length} elements | ${(text.length / 1000).toFixed(1)}k chars`,
     Date.now() - scrapeStart
   );
 

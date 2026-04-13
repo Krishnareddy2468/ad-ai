@@ -14,34 +14,70 @@ function isSpaShell(html: string): boolean {
 }
 
 export async function scrapePage(url: string): Promise<{ html: string; text: string; title: string }> {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.5',
-    },
-    redirect: 'follow',
-  });
+  const MAX_RETRIES = 3;
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch page: ${response.status} ${response.statusText}`);
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Cache-Control': 'no-cache',
+        },
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const isRetryable = response.status === 503 || response.status === 429 || response.status === 502;
+        if (isRetryable && attempt < MAX_RETRIES - 1) {
+          console.warn(`[Scraper] ${response.status} from ${url}, retrying in ${(attempt + 1) * 2}s...`);
+          await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+          continue;
+        }
+        throw new Error(`Failed to fetch page: ${response.status} ${response.statusText}`);
+      }
+
+      const html = await response.text();
+      
+      if (!html || html.trim().length < 50) {
+        throw new Error('Page returned empty or minimal content');
+      }
+
+      const $ = cheerio.load(html);
+      const title = $('title').text().trim();
+
+      if (isSpaShell(html)) {
+        console.warn(`[Scraper] Detected SPA shell for ${url} (${html.length} bytes). Scripts preserved for client-side rendering.`);
+        return { html, text: title, title: title || url };
+      }
+
+      // Extract text for analysis — from a clone so original HTML stays intact
+      const $clone = cheerio.load(html);
+      $clone('script, style, noscript, iframe').remove();
+      const text = $clone('body').text().replace(/\s+/g, ' ').trim();
+
+      return { html, text, title };
+    } catch (error: any) {
+      lastError = error;
+      if (error.name === 'AbortError') {
+        console.warn(`[Scraper] Timeout fetching ${url}, attempt ${attempt + 1}/${MAX_RETRIES}`);
+      } else {
+        console.warn(`[Scraper] Error fetching ${url}: ${error.message}, attempt ${attempt + 1}/${MAX_RETRIES}`);
+      }
+      if (attempt < MAX_RETRIES - 1) {
+        await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+      }
+    }
   }
 
-  const html = await response.text();
-  const $ = cheerio.load(html);
-  const title = $('title').text().trim();
-
-  // Detect SPA pages — keep scripts intact so iframe can render them
-  if (isSpaShell(html)) {
-    console.warn(`[Scraper] Detected SPA shell for ${url} (${html.length} bytes). Scripts preserved for client-side rendering.`);
-    return { html, text: title, title: title || url };
-  }
-
-  // Normal SSR page — extract text (strip scripts for text extraction only)
-  $('script, style, noscript, iframe').remove();
-  const text = $('body').text().replace(/\s+/g, ' ').trim();
-
-  return { html, text, title };
+  throw lastError || new Error(`Failed to fetch ${url} after ${MAX_RETRIES} attempts`);
 }
 
 export function extractPageStructure(html: string) {
@@ -57,11 +93,11 @@ export function extractPageStructure(html: string) {
     elements.push({ type, selector, text: cleaned });
   }
 
-  // Extract headlines (h1-h4)
+  // Extract headlines (h1-h4) — skip tiny fragments (< 5 chars)
   $('h1, h2, h3, h4').each((i, el) => {
     const tag = $(el).prop('tagName')?.toLowerCase() || 'h1';
     const text = $(el).text().trim();
-    if (text.length > 0 && text.length < 300) {
+    if (text.length >= 5 && text.length < 300) {
       addElement(tag === 'h1' ? 'headline' : 'subheadline', `${tag}:nth-of-type(${i + 1})`, text);
     }
   });

@@ -33,9 +33,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, result });
   } catch (error: any) {
     console.error('Personalization error:', error);
+    const status = error?.status || error?.httpStatusCode || 500;
+    const isServiceError = status === 503 || status === 429 || error?.message?.includes('503');
     return NextResponse.json(
-      { error: error.message || 'Failed to personalize page' },
-      { status: 500 }
+      { 
+        error: isServiceError 
+          ? 'AI service temporarily unavailable. Please try again in a few seconds.' 
+          : (error.message || 'Failed to personalize page'),
+        retryable: isServiceError,
+      },
+      { status: isServiceError ? 503 : 500 }
     );
   }
 }

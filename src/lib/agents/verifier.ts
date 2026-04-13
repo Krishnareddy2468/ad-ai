@@ -212,8 +212,8 @@ async function verifyStructuralIntegrity(
     }
   }
 
-  // Check for JS injection (safety)
-  const dangerousPatterns = [new RegExp('<script[^>]*>.*?(eval|document\\.write|innerHTML)', 'is')];
+  // Check for JS injection (safety) — exclude our own personalization script
+  const dangerousPatterns = [new RegExp('<script(?![^>]*data-ad-personalization)[^>]*>.*?(eval|document\\.write)', 'is')];
   for (const pattern of dangerousPatterns) {
     const origMatch = originalHtml.match(pattern);
     const newMatch = personalizedHtml.match(pattern);

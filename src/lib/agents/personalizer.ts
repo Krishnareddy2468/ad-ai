@@ -1,6 +1,17 @@
 import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
 import * as cheerio from 'cheerio';
 
+/**
+ * Personalizer — applies CRO changes to the landing page.
+ * 
+ * KEY DESIGN: We use Cheerio ONLY for read-only matching (finding which
+ * elements exist in the page). The actual modifications are applied via
+ * an injected client-side script that runs after the page loads.
+ * 
+ * This preserves the original HTML exactly — all CSS, JS, SVG, and
+ * framework-specific markup stays intact. Cheerio's $.html() serialization
+ * is known to break modern JS framework pages (Next.js, React, etc.).
+ */
 export async function personalizeHtml(
   originalHtml: string,
   adAnalysis: AdAnalysis,
@@ -8,15 +19,12 @@ export async function personalizeHtml(
 ): Promise<{ html: string; appliedChanges: PageElement[] }> {
   const $ = cheerio.load(originalHtml);
   const appliedChanges: PageElement[] = [];
-
-  // Remove existing base tags first
-  $('base').remove();
+  const verifiedChanges: { original: string; modified: string; type: string }[] = [];
 
   for (const change of croAnalysis.priorityChanges) {
     try {
       let found = false;
 
-      // Strategy 1: Search by element type and text content
       const typeToTags: Record<string, string[]> = {
         headline: ['h1', 'h2', 'h3', 'h4'],
         subheadline: ['h2', 'h3', 'h4', 'h5'],
@@ -26,134 +34,231 @@ export async function personalizeHtml(
       };
 
       const tags = typeToTags[change.type] || ['h1', 'h2', 'h3', 'h4', 'p', 'a', 'button', 'span', 'div'];
-
-      // Normalize the original text from the CRO recommendation
       const normalizedOriginal = change.original.replace(/\s+/g, ' ').trim().toLowerCase();
+      // Collapsed version strips ALL whitespace for fuzzy matching
+      const collapsedOriginal = normalizedOriginal.replace(/\s/g, '');
 
+      // Strategy 1: Search by element type
       for (const tag of tags) {
         $(tag).each((_, el) => {
           if (found) return;
-          const elText = $(el).text().replace(/\s+/g, ' ').trim();
+          // Use spaced text extraction (joins child texts with spaces)
+          const elText = getTextWithSpaces($, el);
           const normalizedElText = elText.toLowerCase();
+          const collapsedElText = normalizedElText.replace(/\s/g, '');
 
-          // Match strategies (from most to least strict)
           const isMatch =
             normalizedElText === normalizedOriginal ||
+            collapsedElText === collapsedOriginal ||
             normalizedElText.includes(normalizedOriginal) ||
             normalizedOriginal.includes(normalizedElText) ||
             (normalizedElText.length > 5 && similarity(normalizedElText, normalizedOriginal) > 0.5) ||
-            // Partial word overlap for short CTA texts
             (change.type === 'cta' && normalizedElText.length < 40 && wordOverlap(normalizedElText, normalizedOriginal) > 0.5);
 
           if (isMatch) {
-            // For elements with children, be careful about replacement
-            if ($(el).children().length === 0) {
-              $(el).text(change.modified);
-            } else {
-              // Try to replace the original text within the HTML
-              const html = $(el).html() || '';
-              const escaped = escapeRegExp(change.original);
-              const newHtml = html.replace(new RegExp(escaped, 'i'), change.modified);
-              if (newHtml !== html) {
-                $(el).html(newHtml);
-              } else {
-                // Replace first text node
-                const textNodes = $(el).contents().filter(function () {
-                  return this.type === 'text' && (this as any).data?.trim().length > 0;
-                });
-                if (textNodes.length > 0) {
-                  textNodes.first().replaceWith(change.modified + ' ');
-                } else {
-                  // Fallback: replace the innermost child's text
-                  const deepest = findDeepestTextElement($, el);
-                  if (deepest) {
-                    $(deepest).text(change.modified);
-                  }
-                }
-              }
-            }
             found = true;
-            $(el).attr('data-personalized', 'true');
+            // Record the SPACED version for client-side matching
+            verifiedChanges.push({
+              original: elText,
+              modified: change.modified,
+              type: change.type,
+            });
             appliedChanges.push(change);
           }
         });
         if (found) break;
       }
 
-      // Strategy 2: Global text search across all elements
+      // Strategy 2: Global text search
       if (!found) {
         $('*').each((_, el) => {
           if (found) return;
           if (['script', 'style', 'noscript', 'meta', 'link'].includes(
             ($(el).prop('tagName') || '').toLowerCase()
           )) return;
-          
-          const elText = $(el).clone().children().remove().end().text().trim();
-          if (elText.length > 0 && similarity(elText.toLowerCase(), normalizedOriginal) > 0.6) {
-            $(el).contents().filter(function () {
-              return this.type === 'text';
-            }).first().replaceWith(change.modified);
+
+          const elText = getTextWithSpaces($, el);
+          const collapsedEl = elText.toLowerCase().replace(/\s/g, '');
+          if (elText.length > 0 && (
+            similarity(elText.toLowerCase(), normalizedOriginal) > 0.6 ||
+            collapsedEl === collapsedOriginal
+          )) {
             found = true;
-            $(el).attr('data-personalized', 'true');
+            verifiedChanges.push({
+              original: elText,
+              modified: change.modified,
+              type: change.type,
+            });
             appliedChanges.push(change);
           }
         });
       }
 
       if (!found) {
-        // Record as suggested (couldn't find in page)
-        appliedChanges.push({ ...change, modified: `[SUGGESTED] ${change.modified}` });
+        appliedChanges.push({ ...change, rationale: `[Suggested] ${change.rationale}` });
       }
     } catch {
-      // Skip failed changes silently
+      // Skip failed changes
     }
   }
 
-  // Inject personalization indicator styles
-  $('head').append(`
-    <style>
-      [data-personalized="true"] {
-        position: relative;
-      }
-      [data-personalized="true"]::after {
-        content: '✨ Personalized';
-        position: absolute;
-        top: -8px;
-        right: -8px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        font-size: 9px;
-        padding: 2px 6px;
-        border-radius: 8px;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-        z-index: 9999;
-        pointer-events: none;
-        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
-      }
-    </style>
-  `);
+  // Build personalized HTML from the ORIGINAL (not Cheerio-serialized) HTML
+  let html = originalHtml;
 
-  return { html: $.html(), appliedChanges };
+  // Strip existing <base> tags (orchestrator injects its own)
+  html = html.replace(/<base\b[^>]*\/?>/gi, '');
+
+  // Strip restrictive CSP meta tags that block resource loading in iframe
+  html = html.replace(/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]*>/gi, '');
+
+  // Inject client-side modification script before </body>
+  if (verifiedChanges.length > 0) {
+    const script = buildModificationScript(verifiedChanges);
+    const bodyCloseMatch = html.match(/<\/body>/i);
+    if (bodyCloseMatch && bodyCloseMatch.index !== undefined) {
+      html = html.slice(0, bodyCloseMatch.index) + script + html.slice(bodyCloseMatch.index);
+    } else {
+      html += script;
+    }
+  }
+
+  return { html, appliedChanges };
 }
 
 /**
- * Find the deepest element that contains primarily text content
+ * Extract text from an element, adding spaces between child elements.
+ * Cheerio's .text() concatenates children without separators (e.g., 
+ * <h1><span>Be the next</span><span>big thing</span></h1> → "Be the nextbig thing").
+ * This function returns "Be the next big thing" instead.
  */
-function findDeepestTextElement($: cheerio.CheerioAPI, el: any): any {
-  const children = $(el).children();
-  if (children.length === 0) return el;
-  // Find child with most text
-  let bestChild = null;
-  let bestLen = 0;
-  children.each((_, child) => {
-    const text = $(child).text().trim();
-    if (text.length > bestLen) {
-      bestLen = text.length;
-      bestChild = child;
+function getTextWithSpaces($: cheerio.CheerioAPI, el: any): string {
+  const parts: string[] = [];
+  $(el).contents().each((_, node) => {
+    if (node.type === 'text') {
+      const d = (node as any).data?.trim();
+      if (d) parts.push(d);
+    } else if (node.type === 'tag') {
+      const childText = getTextWithSpaces($, node);
+      if (childText) parts.push(childText);
     }
   });
-  return bestChild ? findDeepestTextElement($, bestChild) : el;
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Build a self-contained script that modifies text nodes in the live DOM.
+ * Runs on DOMContentLoaded + retries to catch SPA-rendered content.
+ */
+function buildModificationScript(
+  changes: { original: string; modified: string; type: string }[]
+): string {
+  // Escape JSON for safe inline <script> embedding
+  const safeJson = JSON.stringify(changes)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e');
+
+  return `
+<script data-ad-personalization="true">
+(function(){
+  var changes=${safeJson};
+  var applied={};
+
+  function normalize(s){return (s||'').replace(/\\s+/g,' ').trim()}
+  function normLower(s){return normalize(s).toLowerCase()}
+  function collapse(s){return normLower(s).replace(/\\s/g,'')}
+
+  function textMatch(a,b){
+    if(a===b) return true;
+    // Collapsed match: ignore all whitespace differences
+    if(collapse(a)===collapse(b)) return true;
+    if(a.length>5&&(a.indexOf(b)!==-1||b.indexOf(a)!==-1)) return true;
+    return false;
+  }
+
+  function applyChanges(){
+    changes.forEach(function(c,i){
+      if(applied[i]) return;
+      var origL=normLower(c.original);
+      if(!origL) return;
+
+      // Strategy A: Element-level matching using innerText (handles child spans)
+      var tags=c.type==='headline'?'h1,h2,h3,h4':c.type==='subheadline'?'h2,h3,h4,h5':c.type==='cta'?'a,button,[role=button]':'p,span,div,li';
+      var allTags='h1,h2,h3,h4,h5,h6,p,a,button,span,div,li';
+      var els=document.querySelectorAll(tags);
+      for(var j=0;j<els.length;j++){
+        var et=normLower(els[j].innerText||els[j].textContent);
+        if(textMatch(et,origL)){
+          var target=els[j];
+          while(target.children.length===1&&textMatch(normLower(target.children[0].innerText||target.children[0].textContent),et)){
+            target=target.children[0];
+          }
+          if(target.children.length===0){
+            target.textContent=c.modified;
+          }else{
+            // Put the replacement text into the first text node, clear the rest
+            var tw2=document.createTreeWalker(target,NodeFilter.SHOW_TEXT,null);
+            var firstText=tw2.nextNode();
+            if(firstText){
+              firstText.textContent=c.modified;
+              var remaining;
+              while(remaining=tw2.nextNode()){remaining.textContent='';}
+            }
+          }
+          applied[i]=true;
+          break;
+        }
+      }
+
+      // Strategy B: TreeWalker on individual text nodes
+      if(!applied[i]){
+        var tw=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null);
+        var node;
+        while(node=tw.nextNode()){
+          var t=normLower(node.textContent);
+          if(!t) continue;
+          if(textMatch(t,origL)){
+            node.textContent=c.modified;
+            applied[i]=true;
+            break;
+          }
+        }
+      }
+
+      // Strategy C: Broadest search using all common tags
+      if(!applied[i]){
+        var broadEls=document.querySelectorAll(allTags);
+        for(var k=0;k<broadEls.length;k++){
+          var bt=normLower(broadEls[k].innerText||broadEls[k].textContent);
+          if(bt===origL){
+            var bTarget=broadEls[k];
+            while(bTarget.children.length===1&&normLower(bTarget.children[0].innerText||bTarget.children[0].textContent)===bt){
+              bTarget=bTarget.children[0];
+            }
+            if(bTarget.children.length===0){
+              bTarget.textContent=c.modified;
+            }else{
+              var tw3=document.createTreeWalker(bTarget,NodeFilter.SHOW_TEXT,null);
+              var ft=tw3.nextNode();
+              if(ft){ft.textContent=c.modified;var r;while(r=tw3.nextNode()){r.textContent='';}}
+            }
+            applied[i]=true;
+            break;
+          }
+        }
+      }
+    });
+  }
+
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',applyChanges);
+  }else{
+    applyChanges();
+  }
+  setTimeout(applyChanges,1000);
+  setTimeout(applyChanges,3000);
+  setTimeout(applyChanges,6000);
+})();
+<\/script>`;
 }
 
 /**

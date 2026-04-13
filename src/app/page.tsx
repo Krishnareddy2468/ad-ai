@@ -125,20 +125,29 @@ export default function Home() {
       updateStep('cro', { status: 'running' });
       const pipelineStart = Date.now();
 
-      const personalizeRes = await fetch('/api/personalize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: data.adCreativeBase64,
-          imageUrl: data.adCreativeUrl,
-          landingPageUrl: data.landingPageUrl,
-        }),
-      });
-
-      if (!personalizeRes.ok) {
-        const err = await personalizeRes.json();
-        throw new Error(err.error || 'Failed to personalize page');
-      }
+      const personalizeRes = await (async () => {
+        const MAX_RETRIES = 2;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          const res = await fetch('/api/personalize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageBase64: data.adCreativeBase64,
+              imageUrl: data.adCreativeUrl,
+              landingPageUrl: data.landingPageUrl,
+            }),
+          });
+          if (res.ok) return res;
+          const body = await res.json().catch(() => ({}));
+          if (body.retryable && attempt < MAX_RETRIES) {
+            console.warn(`[Personalize] Retrying (${attempt + 1}/${MAX_RETRIES})...`);
+            await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
+            continue;
+          }
+          throw new Error(body.error || 'Failed to personalize page');
+        }
+        throw new Error('Failed to personalize page after retries');
+      })();
 
       const personalizeData = await personalizeRes.json();
       const pipelineEnd = Date.now();

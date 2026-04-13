@@ -40,8 +40,8 @@ export default function ResultView({ result, onReset }: ResultViewProps) {
   const [splitView, setSplitView] = useState(false);
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null);
 
-  const appliedCount = result.changes.filter(c => !c.modified.startsWith('[SUGGESTED]')).length;
-  const suggestedCount = result.changes.filter(c => c.modified.startsWith('[SUGGESTED]')).length;
+  const appliedCount = result.changes.filter(c => !c.rationale.startsWith('[Suggested]')).length;
+  const suggestedCount = result.changes.filter(c => c.rationale.startsWith('[Suggested]')).length;
 
   const tabs = [
     { id: 'preview' as Tab, label: 'Preview', icon: Eye },
@@ -198,9 +198,9 @@ export default function ResultView({ result, onReset }: ResultViewProps) {
                   </div>
                   <div className="rounded-2xl overflow-hidden border border-white/10 bg-white h-[600px]">
                     <iframe
-                      src={result.landingPageUrl}
+                      srcDoc={result.originalHtml}
                       className="w-full h-full"
-                      sandbox="allow-same-origin allow-scripts"
+                      sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
                       title="Original page"
                     />
                   </div>
@@ -214,7 +214,7 @@ export default function ResultView({ result, onReset }: ResultViewProps) {
                     <iframe
                       srcDoc={result.personalizedHtml}
                       className="w-full h-full"
-                      sandbox="allow-same-origin allow-scripts"
+                      sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
                       title="Personalized page"
                     />
                   </div>
@@ -228,16 +228,16 @@ export default function ResultView({ result, onReset }: ResultViewProps) {
                 </div>
                 {showOriginal ? (
                   <iframe
-                    src={result.landingPageUrl}
+                    srcDoc={result.originalHtml}
                     className="w-full h-full"
-                    sandbox="allow-same-origin allow-scripts"
+                    sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
                     title="Original page"
                   />
                 ) : (
                   <iframe
                     srcDoc={result.personalizedHtml}
                     className="w-full h-full"
-                    sandbox="allow-same-origin allow-scripts"
+                    sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
                     title="Personalized page"
                   />
                 )}
@@ -274,8 +274,8 @@ export default function ResultView({ result, onReset }: ResultViewProps) {
               </div>
             )}
             {result.changes.map((change, index) => {
-              const isSuggested = change.modified.startsWith('[SUGGESTED]');
-              const displayModified = isSuggested ? change.modified.replace('[SUGGESTED] ', '') : change.modified;
+              const isSuggested = change.rationale.startsWith('[Suggested]');
+              const displayModified = change.modified;
               return (
               <motion.div
                 key={index}

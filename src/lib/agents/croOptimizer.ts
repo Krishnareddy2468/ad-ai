@@ -3,26 +3,47 @@ import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
 
 const MAX_ELEMENTS = 25; // Limit elements to keep prompt manageable
 
-const SYSTEM_PROMPT = `You are a CRO specialist. Analyze a landing page against an ad creative and return personalization changes as JSON.
+const SYSTEM_PROMPT = `You are an expert CRO copywriter. Your job is to rewrite landing page copy so it feels like the page was built specifically for the ad the user just clicked. Every modification must sound natural, professional, and persuasive — like it was written by a senior marketing copywriter, not a robot.
 
-CRO Rules:
-1. MESSAGE MATCH: Headline must mirror the ad's promise
-2. SCENT TRAIL: Continue visual/verbal cues from ad to page
+CRO Principles:
+1. MESSAGE MATCH: Headline mirrors the ad's core promise
+2. SCENT TRAIL: Visual/verbal continuity from ad to page
 3. SINGLE FOCUS: Primary CTA aligned with ad intent
-4. URGENCY: Match urgency level from ad
-5. BENEFIT COPY: Features → Benefits aligned with ad messaging
+4. URGENCY: Match the ad's urgency tone
+5. BENEFIT COPY: Lead with benefits, not features
 
-IMPORTANT: You MUST return ONLY valid JSON. No markdown, no explanation, no code fences.
+Writing Rules:
+- Write like a professional copywriter — punchy, clear, benefit-driven
+- Keep the page's existing voice and style, but weave in the ad's messaging
+- Do NOT just paste the ad headline into the page verbatim
+- Headlines should be compelling and action-oriented (8-12 words ideal)
+- CTAs should be specific and action-driven ("Start Your Free Trial" not just "Sign Up")
+- Body text should naturally reference the ad's key value proposition
+- Never invent fake statistics, testimonials, or claims
+- Keep modifications concise — don't turn a short headline into a paragraph
+
+BAD modification example:
+  original: "Welcome to Our Platform"
+  modified: "50% Off Running Shoes"  ← Just pasted ad headline, doesn't fit the page
+
+GOOD modification example:
+  original: "Welcome to Our Platform"
+  modified: "The Running Gear That Keeps Up With You — Now 50% Off"  ← Professional, blends ad promise with page context
+
+IMPORTANT: Return ONLY valid JSON. No markdown, no explanation, no code fences.
 
 Return this exact JSON structure:
-{"messageMatchScore":75,"currentIssues":["issue1"],"recommendations":["rec1"],"priorityChanges":[{"selector":"h1:nth-of-type(1)","type":"headline","original":"exact original text","modified":"new text","rationale":"why","croRule":"MESSAGE MATCH"}]}
+{"messageMatchScore":75,"currentIssues":["issue1"],"recommendations":["rec1"],"priorityChanges":[{"selector":"h1:nth-of-type(1)","type":"headline","original":"exact original text","modified":"professionally rewritten text","rationale":"why this change improves conversion","croRule":"MESSAGE MATCH"}]}
 
 Rules for priorityChanges:
-- Make 4-6 changes (not more)
-- "original" must be the EXACT text from the page elements provided
-- "type" must be one of: headline, subheadline, cta, body, hero
-- Keep changes concise — modify copy only, don't rewrite entire paragraphs
-- Do NOT invent fake statistics or testimonials`;
+- Make 4-6 changes maximum
+- "original" must be the EXACT text from the page elements
+- "modified" must be professionally written marketing copy
+- "type" must be: headline, subheadline, cta, body, or hero
+- Headlines: 6-15 words, benefit-driven, action-oriented
+- CTAs: 2-6 words, specific action verbs ("Get Started Free", "Claim Your Discount")
+- Body: Keep similar length, refocus on ad's value proposition
+- Each change must include a clear rationale`;
 
 /**
  * Prepare elements for the prompt — limit count, shorten long texts, 
@@ -71,14 +92,27 @@ export async function analyzeCRO(
 
   const prompt = `${SYSTEM_PROMPT}
 
-Ad: ${JSON.stringify(adSummary)}
+--- AD CREATIVE ANALYSIS ---
+Headline: "${adSummary.headline}"
+Value Proposition: "${adSummary.valueProposition}"
+Target Audience: ${adSummary.targetAudience}
+Tone: ${adSummary.tone}
+CTA: "${adSummary.cta}"
+Urgency: ${adSummary.urgency}
+Keywords: ${adSummary.keywords.join(', ')}
 
-Page: "${pageTitle}"
+--- LANDING PAGE: "${pageTitle}" ---
+Current page elements:
+${preparedElements.map((e, i) => `${i + 1}. [${e.type.toUpperCase()}] "${e.text}"`).join('\n')}
 
-Elements:
-${preparedElements.map((e, i) => `${i + 1}. [${e.type}] "${e.text}"`).join('\n')}
+--- INSTRUCTIONS ---
+Analyze the gap between what the ad promises and what your page currently says.
+Score the current message match (0-100).
+Then write 4-6 professional copy modifications that close the gap.
+Each "modified" field must be polished marketing copy — NOT a copy-paste of the ad text.
+Think like a conversion copywriter crafting landing page copy for this specific ad campaign.
 
-Return ONLY the JSON object — no markdown fences, no explanation.`;
+Return ONLY the JSON object.`;
 
   // Try up to 2 attempts with different temperatures
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -131,60 +165,98 @@ function generateSyntheticCRO(
 ): CROAnalysis {
   const changes: PageElement[] = [];
 
-  // Find headlines and suggest aligning with ad headline
+  // Find headlines and craft a professional replacement
   const headlines = elements.filter((e) => e.type === 'headline');
   if (headlines.length > 0 && ad.headline) {
+    // Craft a headline that blends ad promise with page context
+    const headline = ad.valueProposition
+      ? `${ad.headline} — ${ad.valueProposition}`
+      : ad.headline;
+    // Keep it punchy: max 15 words
+    const words = headline.split(/\s+/);
+    const modified = words.length > 15 ? words.slice(0, 15).join(' ') : headline;
     changes.push({
       selector: headlines[0].selector,
       type: 'headline',
       original: headlines[0].text,
-      modified: ad.headline,
-      rationale: 'Align primary headline with ad creative messaging for message match',
+      modified,
+      rationale: 'Primary headline aligned with ad creative promise for immediate message match',
       croRule: 'MESSAGE MATCH',
     });
   }
 
-  // Find subheadlines and align with value prop
+  // Find subheadlines and write benefit-driven copy
   const subheadlines = elements.filter((e) => e.type === 'subheadline');
   if (subheadlines.length > 0 && ad.valueProposition) {
+    const audience = ad.targetAudience || 'you';
+    const modified = `Built for ${audience.toLowerCase()} — ${ad.valueProposition.toLowerCase()}.`;
     changes.push({
       selector: subheadlines[0].selector,
       type: 'subheadline',
       original: subheadlines[0].text,
-      modified: ad.valueProposition,
-      rationale: 'Reinforce value proposition from ad creative',
+      modified: modified.charAt(0).toUpperCase() + modified.slice(1),
+      rationale: 'Subheadline reinforces value proposition and speaks directly to the target audience',
       croRule: 'SCENT TRAIL',
     });
   }
 
-  // Find CTAs and align with ad CTA
+  // Find CTAs and make them specific and action-driven
   const ctas = elements.filter((e) => e.type === 'cta');
   if (ctas.length > 0 && ad.callToAction) {
+    // Make CTA more action-oriented if the ad's CTA is generic
+    let ctaText = ad.callToAction;
+    const genericCTAs = ['learn more', 'click here', 'submit', 'sign up', 'get started'];
+    if (genericCTAs.some(g => ctaText.toLowerCase().includes(g)) && ad.valueProposition) {
+      // Generate a more specific CTA
+      if (ad.urgencyLevel === 'high') {
+        ctaText = `Get ${ad.valueProposition.split(' ').slice(0, 3).join(' ')} Now`;
+      } else {
+        ctaText = `Start Your ${ad.valueProposition.split(' ').slice(0, 2).join(' ')} Today`;
+      }
+    }
     changes.push({
       selector: ctas[0].selector,
       type: 'cta',
       original: ctas[0].text,
-      modified: ad.callToAction,
-      rationale: 'Match CTA text with ad creative for continuity',
+      modified: ctaText,
+      rationale: 'CTA matches ad creative intent with clear action verb',
       croRule: 'SINGLE FOCUS',
     });
   }
 
-  // Find body text and weave in keywords
+  // Find hero/body text and weave in ad messaging naturally
+  const heroElements = elements.filter((e) => e.type === 'hero');
   const bodyElements = elements.filter((e) => e.type === 'body');
-  if (bodyElements.length > 0 && ad.keywords.length > 0) {
-    const original = bodyElements[0].text;
-    const modified = original.length > 100
-      ? `${ad.valueProposition}. ${original.substring(0, 80)}…`
-      : ad.valueProposition || original;
+  const textEl = heroElements[0] || bodyElements[0];
+  if (textEl && ad.keywords.length > 0) {
+    const topKeywords = ad.keywords.slice(0, 3).join(', ');
+    const benefit = ad.valueProposition || ad.headline || '';
+    const modified = benefit
+      ? `Discover how ${topKeywords} can help you ${benefit.toLowerCase()}. Join thousands who have already made the switch.`
+      : textEl.text;
     changes.push({
-      selector: bodyElements[0].selector,
-      type: 'body',
-      original,
+      selector: textEl.selector,
+      type: textEl.type as 'body' | 'hero',
+      original: textEl.text,
       modified,
-      rationale: 'Lead with value proposition to capture attention',
+      rationale: 'Supporting copy reinforces ad keywords and value proposition',
       croRule: 'BENEFIT COPY',
     });
+  }
+
+  // Add urgency if the ad has high urgency
+  if (ad.urgencyLevel === 'high' && bodyElements.length > 1) {
+    const el = bodyElements[1] || bodyElements[0];
+    if (el && !changes.some(c => c.original === el.text)) {
+      changes.push({
+        selector: el.selector,
+        type: 'body',
+        original: el.text,
+        modified: `Don't miss out — ${ad.valueProposition || ad.headline}. Limited availability.`,
+        rationale: 'Urgency messaging mirrors the ad creative tone',
+        croRule: 'URGENCY',
+      });
+    }
   }
 
   const score = changes.length > 0 ? Math.min(65, 30 + changes.length * 10) : 30;
