@@ -1,36 +1,66 @@
 import { generateWithFallback, safeParseJSON } from '../openai';
 import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
 
-const MAX_ELEMENTS = 15; // Enough elements for 6 changes
-const MAX_CHANGES = 6;   // Hard cap — up to 6 changes
+const MAX_ELEMENTS = 15;
+const MAX_CHANGES = 6;
 
-const SYSTEM_PROMPT = `You are a CRO copywriter. Rewrite landing page text so it matches the ad the visitor clicked.
+/**
+ * SYSTEM prompt — acts as a fixed "persona" that never changes.
+ * Uses structured-output anchoring + algorithmic rules to force
+ * the same answer every time for the same input.
+ */
+const SYSTEM_PROMPT = `You are a deterministic CRO copy-rewriting function.
+You receive a numbered list of page elements and an ad analysis.
+You output a fixed JSON object with exactly 6 rewritten elements.
 
-STRICT RULES — follow these exactly:
-1. Return EXACTLY 6 changes. No more, no fewer.
-2. "original" MUST be copied character-for-character from the page elements list below. Do NOT shorten, rephrase, or paraphrase the original.
-3. "modified" MUST keep the same approximate length as the original (±30% word count).
-4. "modified" MUST blend the ad's promise with the page's existing voice. Do NOT paste the ad headline verbatim.
-5. Do NOT invent statistics, testimonials, percentages, or claims that are not in the ad analysis.
-6. Do NOT modify navigation labels, footer links, or cookie notices.
-7. Pick only elements with 3 or more words as originals. Skip single words or short fragments.
-8. Each "type" must be one of: headline, subheadline, cta, body, hero.
+## SELECTION ALGORITHM (follow this exact order — no skipping):
+Step 1: Select the FIRST element whose type is HEADLINE.
+Step 2: Select the FIRST element whose type is SUBHEADLINE.
+Step 3: Select the FIRST element whose type is CTA.
+Step 4: Select the FIRST element whose type is HERO or BODY.
+Step 5: Select the SECOND element whose type is SUBHEADLINE (or next BODY if none).
+Step 6: Select the SECOND element whose type is CTA (or next BODY if none).
+If fewer than 6 distinct elements exist, return as many as available.
+Never select the same element twice.
 
-CHANGE PRIORITY (pick in this order):
-  1st: The primary headline (h1) — align with ad promise
-  2nd: A subheadline (h2/h3) — reinforce value proposition
-  3rd: The primary CTA button — match ad call-to-action
-  4th: A body/hero paragraph — weave in ad keywords naturally
-  5th: A second subheadline or body element — deepen message match
-  6th: A secondary CTA or additional body text — consistent scent trail
+## REWRITING RULES:
+R1. "original" = copy the element text CHARACTER-FOR-CHARACTER from the numbered list. Do not change a single letter.
+R2. "modified" = rewrite to blend the ad's promise with the page's voice.
+R3. Keep modified within ±30% word count of original.
+R4. Do NOT paste the ad headline verbatim.
+R5. Do NOT invent statistics, testimonials, or claims absent from the ad.
+R6. Headlines → 6-12 words, benefit-driven.
+R7. CTAs → 2-5 words, action verb (e.g. "Start Free Trial").
+R8. Body → same sentence count, naturally weave in ad value prop.
 
-FORMATTING:
-- Headlines: 6–12 words, benefit-driven
-- CTAs: 2–5 words, action verb ("Start Free Trial", "Get Your Demo")
-- Body: Same sentence count as original, naturally reference ad value prop
+## OUTPUT FORMAT (return ONLY this JSON, nothing else):
+{"messageMatchScore":<0-100>,"currentIssues":["..."],"recommendations":["..."],"priorityChanges":[{"selector":"<from list>","type":"<headline|subheadline|cta|body|hero>","original":"<exact text>","modified":"<rewrite>","rationale":"<1 sentence>","croRule":"<MESSAGE MATCH|SCENT TRAIL|SINGLE FOCUS|BENEFIT COPY|URGENCY>"}]}`;
 
-Return ONLY this JSON — no markdown, no explanation, no code fences:
-{"messageMatchScore":70,"currentIssues":["issue"],"recommendations":["rec"],"priorityChanges":[{"selector":"h1:nth-of-type(1)","type":"headline","original":"exact text from list","modified":"rewritten text","rationale":"reason","croRule":"MESSAGE MATCH"}]}`;
+/**
+ * FEW-SHOT EXAMPLE — anchors the model to a fixed output pattern.
+ * Same example every time → model mimics the structure exactly.
+ */
+const FEW_SHOT_EXAMPLE = {
+  user: `--- AD ANALYSIS ---
+Headline: "Run Faster With CloudFoam Shoes"
+Value Proposition: "Ultra-lightweight running shoes with CloudFoam cushioning"
+Target Audience: Runners and fitness enthusiasts
+Tone: Energetic, motivational
+CTA: "Shop CloudFoam Now"
+Urgency: medium
+Keywords: running, shoes, CloudFoam, lightweight, cushioning
+
+--- LANDING PAGE: "SportGear Pro" ---
+Page elements:
+  1. [HEADLINE] "Welcome to SportGear Pro"
+  2. [SUBHEADLINE] "The best gear for every athlete"
+  3. [CTA] "Shop Now"
+  4. [HERO] "We carry thousands of products from top brands to fuel your passion for sports."
+  5. [SUBHEADLINE] "Trusted by athletes worldwide"
+  6. [CTA] "Browse Collection"
+  7. [BODY] "Free shipping on orders over $50. Easy returns within 30 days."`,
+  assistant: `{"messageMatchScore":45,"currentIssues":["Primary headline is generic and does not reference CloudFoam or running","CTA does not match ad call-to-action","Body copy does not mention lightweight cushioning"],"recommendations":["Align headline with CloudFoam running shoes promise","Match CTA to ad creative","Weave cushioning benefit into body copy"],"priorityChanges":[{"selector":"h1:nth-of-type(1)","type":"headline","original":"Welcome to SportGear Pro","modified":"Run Lighter, Run Faster — Discover CloudFoam Cushioning","rationale":"Aligns headline with ad promise of lightweight CloudFoam running shoes","croRule":"MESSAGE MATCH"},{"selector":"h2:nth-of-type(1)","type":"subheadline","original":"The best gear for every athlete","modified":"The Running Gear Engineered for Speed and Comfort","rationale":"Narrows focus from generic athletes to runners matching ad audience","croRule":"SCENT TRAIL"},{"selector":"cta-0","type":"cta","original":"Shop Now","modified":"Shop CloudFoam Now","rationale":"Mirrors ad CTA for consistent scent trail","croRule":"SINGLE FOCUS"},{"selector":"hero-p-0","type":"hero","original":"We carry thousands of products from top brands to fuel your passion for sports.","modified":"Ultra-lightweight CloudFoam cushioning meets elite performance — built for runners who demand more.","rationale":"Replaces generic pitch with ad-specific value proposition","croRule":"BENEFIT COPY"},{"selector":"h2:nth-of-type(2)","type":"subheadline","original":"Trusted by athletes worldwide","modified":"Trusted by Runners Who Choose CloudFoam","rationale":"Reinforces target audience alignment with ad","croRule":"SCENT TRAIL"},{"selector":"cta-1","type":"cta","original":"Browse Collection","modified":"Explore CloudFoam Shoes","rationale":"Secondary CTA maintains consistent product focus","croRule":"SINGLE FOCUS"}]}`
+};
 
 /**
  * Prepare elements for the prompt — limit count, shorten long texts, 
@@ -118,7 +148,7 @@ export async function analyzeCRO(
   // Build a set of known page texts for anti-hallucination validation
   const knownTexts = new Set<string>(preparedElements.map(e => e.text));
 
-  // Compact ad summary — only include fields that have values
+  // Compact ad summary
   const adSummary = {
     headline: adAnalysis.headline,
     valueProposition: adAnalysis.valueProposition,
@@ -129,14 +159,13 @@ export async function analyzeCRO(
     keywords: adAnalysis.keywords.slice(0, 5),
   };
 
-  // Numbered element list — LLM must reference items by exact text
+  // Numbered element list with types — deterministic ordering
   const elementList = preparedElements
     .map((e, i) => `  ${i + 1}. [${e.type.toUpperCase()}] "${e.text}"`)
     .join('\n');
 
-  const prompt = `${SYSTEM_PROMPT}
-
---- AD ANALYSIS ---
+  // User message for the REAL task (follows the few-shot pattern exactly)
+  const userMessage = `--- AD ANALYSIS ---
 Headline: "${adSummary.headline}"
 Value Proposition: "${adSummary.valueProposition}"
 Target Audience: ${adSummary.targetAudience}
@@ -146,21 +175,25 @@ Urgency: ${adSummary.urgency}
 Keywords: ${adSummary.keywords.join(', ')}
 
 --- LANDING PAGE: "${pageTitle}" ---
-Page elements (copy the "original" field EXACTLY from the quoted text below):
-${elementList}
+Page elements:
+${elementList}`;
 
---- TASK ---
-1. Score the message match between ad and page (0-100).
-2. Pick EXACTLY 6 elements from the list above (priority: headline → subheadline → CTA → body → more body/CTAs).
-3. Rewrite each one to align with the ad's promise while keeping the page's voice.
-4. Copy the "original" text exactly as shown in quotes above — character for character.
-5. Return ONLY the JSON object. No other text.`;
-
-  // Single attempt with very low temperature for consistency
+  // Multi-turn: system → few-shot example → real request
+  // Few-shot anchoring forces the model to follow the EXACT same pattern
   const result = await generateWithFallback({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    systemInstruction: { role: 'user', parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [
+      // Few-shot: example input
+      { role: 'user', parts: [{ text: FEW_SHOT_EXAMPLE.user }] },
+      // Few-shot: example output (model learns the pattern)
+      { role: 'model', parts: [{ text: FEW_SHOT_EXAMPLE.assistant }] },
+      // Real request
+      { role: 'user', parts: [{ text: userMessage }] },
+    ],
     generationConfig: {
-      temperature: 0.1,
+      temperature: 0,          // Fully deterministic — greedy decoding
+      topP: 1,                 // No nucleus sampling
+      topK: 1,                 // Pick the single most likely token every time
       maxOutputTokens: 4096,
     },
   });
