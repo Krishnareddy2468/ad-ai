@@ -108,10 +108,17 @@ export async function personalizeHtml(
   // Strip existing <base> tags (orchestrator injects its own)
   html = html.replace(/<base\b[^>]*\/?>/gi, '');
 
-  // Strip restrictive CSP meta tags that block resource loading in iframe
-  html = html.replace(/<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["'][^>]*>/gi, '');
+  // Strip ALL CSP meta tags (any attribute order) that block inline scripts
+  html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']Content-Security-Policy[^"']*["'][^>]*>/gi, '');
+  // Also strip nonce requirements from remaining script-related CSP
+  html = html.replace(/<meta[^>]*content-security-policy[^>]*>/gi, '');
 
-  // Inject client-side modification script before </body>
+  // PRIMARY: Direct HTML text replacement (works even when CSP blocks scripts)
+  if (verifiedChanges.length > 0) {
+    html = applyDirectReplacements(html, verifiedChanges);
+  }
+
+  // FALLBACK: Also inject client-side script for SPA/dynamically-rendered content
   if (verifiedChanges.length > 0) {
     const script = buildModificationScript(verifiedChanges);
     const bodyCloseMatch = html.match(/<\/body>/i);
@@ -123,6 +130,93 @@ export async function personalizeHtml(
   }
 
   return { html, appliedChanges };
+}
+
+/**
+ * Apply text replacements directly in the HTML string. 
+ * This is the PRIMARY approach — works even when CSP blocks inline scripts.
+ * 
+ * Strategy:
+ * 1. Try exact string replacement (text appears as-is in HTML)
+ * 2. Try regex replacement that allows HTML tags between words
+ *    (handles <span>Be the next</span><span>big thing</span>)
+ * 3. Try replacing just the first occurrence of the text in tag content
+ */
+function applyDirectReplacements(
+  html: string,
+  changes: { original: string; modified: string; type: string }[]
+): string {
+  for (const change of changes) {
+    const orig = change.original.trim();
+    if (!orig || orig.length < 3) continue;
+
+    // Strategy 1: Exact text replacement (most common case)
+    if (html.includes(orig)) {
+      html = html.replace(orig, change.modified);
+      continue;
+    }
+
+    // Strategy 2: Build a regex that matches the text with HTML tags between words.
+    // "Be the next big thing" → matches "Be the next</span><span>big thing"
+    // or "Be the next</span> <span>big thing" etc.
+    try {
+      const words = orig.split(/\s+/).filter(w => w.length > 0);
+      if (words.length >= 2) {
+        // Each word is literal, with optional HTML tags + whitespace between them
+        const escapedWords = words.map(w => escapeRegExp(w));
+        const tagGap = '(?:\\s*<[^>]*>\\s*)*\\s*';  // zero or more HTML tags with optional whitespace
+        const pattern = new RegExp(escapedWords.join(tagGap), 'i');
+        const match = html.match(pattern);
+        if (match && match.index !== undefined) {
+          // Find the enclosing tag to replace its full inner content
+          const matchStart = match.index;
+          const matchEnd = matchStart + match[0].length;
+          
+          // Look backwards for the nearest opening tag
+          const beforeMatch = html.substring(Math.max(0, matchStart - 200), matchStart);
+          const openTagMatch = beforeMatch.match(/.*(<(?:h[1-6]|p|a|button|span|div|li)\b[^>]*>)/i);
+          
+          if (openTagMatch && openTagMatch[1]) {
+            const tagStart = matchStart - (beforeMatch.length - beforeMatch.lastIndexOf(openTagMatch[1]));
+            const tagName = openTagMatch[1].match(/<(\w+)/)?.[1] || '';
+            
+            if (tagName) {
+              // Find closing tag after the match
+              const afterMatch = html.substring(matchEnd);
+              const closePattern = new RegExp(`((?:\\s*<[^>]*>\\s*)*</${tagName}>)`, 'i');
+              const closeMatch = afterMatch.match(closePattern);
+              
+              if (closeMatch && closeMatch.index !== undefined) {
+                // Replace everything between opening and closing tag
+                const fullEnd = matchEnd + closeMatch.index + closeMatch[0].length;
+                const openTag = openTagMatch[1];
+                const closeTag = `</${tagName}>`;
+                html = html.substring(0, tagStart < 0 ? matchStart : tagStart + beforeMatch.lastIndexOf(openTagMatch[1])) +
+                  openTag + change.modified + closeTag +
+                  html.substring(fullEnd);
+                continue;
+              }
+            }
+          }
+          
+          // Fallback: just replace the matched segment
+          html = html.substring(0, matchStart) + change.modified + html.substring(matchEnd);
+          continue;
+        }
+      }
+    } catch {
+      // Regex failed, try next strategy
+    }
+
+    // Strategy 3: Case-insensitive exact match
+    const lowerHtml = html.toLowerCase();
+    const lowerOrig = orig.toLowerCase();
+    const idx = lowerHtml.indexOf(lowerOrig);
+    if (idx !== -1) {
+      html = html.substring(0, idx) + change.modified + html.substring(idx + orig.length);
+    }
+  }
+  return html;
 }
 
 /**

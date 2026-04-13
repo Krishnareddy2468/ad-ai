@@ -86,6 +86,21 @@ export function extractPageStructure(html: string) {
   const elements: { type: string; selector: string; text: string }[] = [];
   const seen = new Set<string>(); // deduplicate
 
+  // Extract text with proper spaces between child elements
+  function spacedText(el: any): string {
+    const parts: string[] = [];
+    $(el).contents().each((_: number, node: any) => {
+      if (node.type === 'text') {
+        const d = (node as any).data?.trim();
+        if (d) parts.push(d);
+      } else if (node.type === 'tag') {
+        const childText = spacedText(node);
+        if (childText) parts.push(childText);
+      }
+    });
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
   function addElement(type: string, selector: string, text: string) {
     const cleaned = text.replace(/\s+/g, ' ').trim();
     if (cleaned.length < 3 || seen.has(cleaned)) return;
@@ -96,7 +111,7 @@ export function extractPageStructure(html: string) {
   // Extract headlines (h1-h4) — skip tiny fragments (< 5 chars)
   $('h1, h2, h3, h4').each((i, el) => {
     const tag = $(el).prop('tagName')?.toLowerCase() || 'h1';
-    const text = $(el).text().trim();
+    const text = spacedText(el);
     if (text.length >= 5 && text.length < 300) {
       addElement(tag === 'h1' ? 'headline' : 'subheadline', `${tag}:nth-of-type(${i + 1})`, text);
     }
@@ -112,7 +127,7 @@ export function extractPageStructure(html: string) {
     'a[href*="get-started"]', 'a[href*="pricing"]',
   ];
   $(ctaSelectors.join(', ')).each((i, el) => {
-    const text = $(el).text().trim();
+    const text = spacedText(el);
     if (text.length > 0 && text.length < 80) {
       addElement('cta', `cta-${i}`, text);
     }
@@ -120,7 +135,7 @@ export function extractPageStructure(html: string) {
 
   // Extract hero/lead text — first large text in main/section/header
   $('main p, header p, section p, [class*="hero"] p, [class*="Hero"] p, [class*="banner"] p').slice(0, 5).each((i, el) => {
-    const text = $(el).text().trim();
+    const text = spacedText(el);
     if (text.length > 15 && text.length < 500) {
       addElement('hero', `hero-p-${i}`, text);
     }
@@ -128,7 +143,7 @@ export function extractPageStructure(html: string) {
 
   // Extract paragraphs (first 15, skip very short ones)
   $('p').slice(0, 15).each((i, el) => {
-    const text = $(el).text().trim();
+    const text = spacedText(el);
     if (text.length > 15 && text.length < 500) {
       addElement('body', `p:nth-of-type(${i + 1})`, text);
     }
@@ -136,7 +151,7 @@ export function extractPageStructure(html: string) {
 
   // Extract list items that might be feature bullets
   $('li').slice(0, 10).each((i, el) => {
-    const text = $(el).text().trim();
+    const text = spacedText(el);
     if (text.length > 10 && text.length < 200) {
       addElement('body', `li-${i}`, text);
     }
@@ -144,7 +159,7 @@ export function extractPageStructure(html: string) {
 
   // Extract span/div with large text that might be headlines in SPAs
   $('[class*="title"], [class*="Title"], [class*="heading"], [class*="Heading"]').each((i, el) => {
-    const text = $(el).text().trim();
+    const text = spacedText(el);
     if (text.length > 3 && text.length < 200) {
       addElement('headline', `titled-${i}`, text);
     }
