@@ -19,38 +19,35 @@ export async function generateWithFallback(
   request: GenerateContentRequest,
   primaryModel?: string
 ) {
-  const modelsToTry = [primaryModel || MODEL, ...FALLBACK_MODELS.filter(m => m !== (primaryModel || MODEL))];
+  const primary = primaryModel || MODEL;
+  // Retry same model twice before falling back — different models produce different outputs
+  const modelsToTry = [primary, primary, ...FALLBACK_MODELS.filter(m => m !== primary)];
   let lastError: any = null;
 
   for (let i = 0; i < modelsToTry.length; i++) {
     const modelName = modelsToTry[i];
+    const isRetry = i === 1 && modelName === primary;
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent(request);
       const text = result.response.text();
       if (!text || text.trim().length === 0) {
-        console.warn(`[Gemini] ${modelName} returned empty response, trying next model...`);
+        console.warn(`[Gemini] ${modelName} returned empty response, trying next...`);
         if (i < modelsToTry.length - 1) continue;
       }
-      if (i > 0) console.log(`[Gemini] Succeeded with fallback model: ${modelName}`);
+      if (i > 1) console.log(`[Gemini] Succeeded with fallback model: ${modelName}`);
       return result;
     } catch (error: any) {
       lastError = error;
       const status = error?.status || error?.httpStatusCode || 0;
-      const isRetryable = status === 503 || status === 429 || error?.message?.includes('503') || error?.message?.includes('429');
 
-      console.error(`[Gemini] ${modelName} failed: ${status} ${error?.message?.substring(0, 150)}`);
+      console.error(`[Gemini] ${modelName}${isRetry ? ' (retry)' : ''} failed: ${status} ${error?.message?.substring(0, 150)}`);
 
-      if (isRetryable && i < modelsToTry.length - 1) {
-        console.log(`[Gemini] Trying fallback: ${modelsToTry[i + 1]}`);
-        await new Promise(r => setTimeout(r, 1000));
-        continue;
-      }
-      
-      // For non-retryable errors (404, 400, etc.), skip to next model
       if (i < modelsToTry.length - 1) {
-        console.log(`[Gemini] Trying fallback: ${modelsToTry[i + 1]}`);
-        await new Promise(r => setTimeout(r, 500));
+        // Wait longer before switching to a different model
+        const delay = isRetry ? 2000 : 1000;
+        console.log(`[Gemini] Next attempt: ${modelsToTry[i + 1]}${i === 0 ? ' (retry)' : ''}`);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
       

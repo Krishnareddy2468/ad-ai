@@ -154,7 +154,7 @@ Verify these changes for quality and accuracy.`;
 
   const result = await generateWithFallback({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.2, maxOutputTokens: 1500 },
+    generationConfig: { temperature: 0, topK: 1, topP: 1, maxOutputTokens: 1500 },
   });
 
   const content = result.response.text() || '{}';

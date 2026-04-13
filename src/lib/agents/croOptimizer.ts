@@ -1,8 +1,12 @@
 import { generateWithFallback, safeParseJSON } from '../openai';
 import { AdAnalysis, CROAnalysis, PageElement } from '@/types';
+import crypto from 'crypto';
 
 const MAX_ELEMENTS = 15;
 const MAX_CHANGES = 6;
+
+// In-memory cache: same ad + same page → identical CRO output
+const croCache = new Map<string, CROAnalysis>();
 
 /**
  * SYSTEM prompt — acts as a fixed "persona" that never changes.
@@ -145,6 +149,20 @@ export async function analyzeCRO(
 ): Promise<CROAnalysis> {
   const preparedElements = prepareElements(pageElements);
 
+  // Deterministic cache key: hash of (ad headline + page title + element texts)
+  const cacheInput = JSON.stringify({
+    h: adAnalysis.headline,
+    v: adAnalysis.valueProposition,
+    t: pageTitle,
+    e: preparedElements.map(e => e.text),
+  });
+  const cacheKey = crypto.createHash('md5').update(cacheInput).digest('hex');
+  
+  if (croCache.has(cacheKey)) {
+    console.log('[CRO Optimizer] Cache hit — returning identical analysis');
+    return croCache.get(cacheKey)!;
+  }
+
   // Build a set of known page texts for anti-hallucination validation
   const knownTexts = new Set<string>(preparedElements.map(e => e.text));
 
@@ -215,13 +233,16 @@ ${elementList}`;
       parsed.priorityChanges = capChanges(parsed.priorityChanges, knownTexts);
       console.log('[CRO Optimizer] Validated', parsed.priorityChanges.length, 'changes, score:', parsed.messageMatchScore);
       if (parsed.priorityChanges.length > 0) {
+        croCache.set(cacheKey, parsed);
         return parsed;
       }
     }
 
   // Fallback: generate synthetic changes from the page elements + ad analysis
   console.warn('[CRO Optimizer] LLM produced no valid changes — generating synthetic CRO recommendations');
-  return generateSyntheticCRO(preparedElements, adAnalysis, pageTitle);
+  const synthetic = generateSyntheticCRO(preparedElements, adAnalysis, pageTitle);
+  croCache.set(cacheKey, synthetic);
+  return synthetic;
 }
 
 /**

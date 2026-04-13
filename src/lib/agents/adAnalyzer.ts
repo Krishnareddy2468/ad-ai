@@ -1,5 +1,9 @@
 import { generateWithFallback, safeParseJSON } from '../openai';
 import { AdAnalysis } from '@/types';
+import crypto from 'crypto';
+
+// In-memory cache: same image → same analysis (eliminates LLM variance)
+const analysisCache = new Map<string, AdAnalysis>();
 
 const SYSTEM_PROMPT = `You are an expert ad creative analyst and CRO specialist. Analyze the provided ad creative image/content and extract key marketing elements. Be precise and actionable.
 
@@ -24,6 +28,15 @@ export async function analyzeAdCreative(input: {
   imageBase64?: string;
   imageUrl?: string;
 }): Promise<AdAnalysis> {
+  // Cache key: hash of the image content for deterministic lookup
+  const cacheInput = input.imageBase64 || input.imageUrl || '';
+  const cacheKey = crypto.createHash('md5').update(cacheInput).digest('hex');
+  
+  if (analysisCache.has(cacheKey)) {
+    console.log('[Ad Analyzer] Cache hit — returning identical analysis');
+    return analysisCache.get(cacheKey)!;
+  }
+
   const parts: any[] = [
     { text: SYSTEM_PROMPT + '\n\nAnalyze this ad creative and extract all marketing elements:' },
   ];
@@ -53,7 +66,12 @@ export async function analyzeAdCreative(input: {
 
   const result = await generateWithFallback({
     contents: [{ role: 'user', parts }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 1000 },
+    generationConfig: {
+      temperature: 0,
+      topK: 1,
+      topP: 1,
+      maxOutputTokens: 1500,
+    },
   });
 
   const content = result.response.text() || '{}';
@@ -75,5 +93,10 @@ export async function analyzeAdCreative(input: {
   if (parsed.headline === 'Ad Creative' && parsed.valueProposition === 'See ad for details') {
     console.warn('[Ad Analyzer] Using fallback values — Gemini output could not be parsed:', content.substring(0, 200));
   }
+  
+  // Cache for deterministic repeat calls
+  analysisCache.set(cacheKey, parsed);
+  console.log('[Ad Analyzer] Cached analysis for future identical requests');
+  
   return parsed;
 }
